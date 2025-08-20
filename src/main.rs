@@ -1,3 +1,4 @@
+use std::env;
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -15,19 +16,21 @@ use users::{get_group_by_gid, get_user_by_uid};
 const DATE_COLOR_TODAY: &str = "\x1b[37m";
 const DATE_COLOR_1DAY: &str = "\x1b[38;5;39m";
 const DATE_COLOR_1MONTH: &str = "\x1b[38;5;33m";
+const HEADER_BACKGROUND: &str = "\x1b[4m\x1b[47m\x1b[30m"; // UNDERLINE, BLACK ON WHITE
+const COLOR_RESET: &str = "\x1b[0m";
 
 #[derive(Parser)]
 #[command(
-    name = "rls",
+    name = "myls",
     about = "Custom ls -l alternative with enhanced formatting",
-    long_about = "Custom ls -l alternative with enhanced formatting and customization.\nDisplays file information with zebra striping and emoji indicators."
+    long_about = "Custom ls -l alternative with enhanced formatting and customization.\nDisplays file information with zebra striping and colors."
 )]
 struct Args {
-    /// Directory to list (default: current directory)
+    /// Files or directories to list (default: current directory)
     #[arg(default_value = ".")]
-    path: String,
+    paths: Vec<String>,
 
-    /// Show hidden files (starting with .)
+    /// Show hidden files (starting with .) when listing a directory
     #[arg(short, long)]
     all: bool,
 
@@ -65,23 +68,36 @@ fn main() {
 fn run() -> i32 {
     let args = Args::parse();
 
-    let directory = Path::new(&args.path);
+    let paths: Vec<PathBuf> = if args.paths.len() == 1 && args.paths[0] == "." {
+        vec![env::current_dir().unwrap_or_else(|_| PathBuf::from("."))]
+    } else {
+        args.paths.iter().map(|p| PathBuf::from(p)).collect()
+    };
 
-    if !directory.exists() {
-        eprintln!("Error: {} does not exist", directory.display());
-        return 1;
-    }
+    let paths: Vec<&Path> = paths.iter().map(|p| p.as_path()).collect();
 
-    if !directory.is_dir() {
-        eprintln!("Error: {} is not a directory", directory.display());
-        return 1;
-    }
+    let mut raw_infos: Vec<RawInfo> = Vec::new();
 
-    let raw_infos = list_directory(directory, args.all);
+    for path in &paths {
+        if !path.exists() {
+            eprintln!("Error: {} does not exist", path.display());
+            return 1;
+        }
 
-    if raw_infos.is_empty() {
-        println!("No files found in {}", directory.display());
-        return 0;
+        // Single dir mode: list dir contents, after dir info itself
+        if path.is_dir() && paths.len() == 1 {
+            if let Some(mut main_dir_info) = get_file_info(path) {
+                main_dir_info.is_main_dir = true;
+                raw_infos.push(main_dir_info);
+            }
+            raw_infos.extend(list_directory(path, args.all));
+        }
+        // Normal mode: list details of given files and dirs
+        else {
+            if let Some(file_info) = get_file_info(path) {
+                raw_infos.push(file_info);
+            }
+        }
     }
 
     // Process the raw data into information needed for printing
@@ -90,12 +106,9 @@ fn run() -> i32 {
         .map(|raw_info| ProcessedInfo::new(raw_info, args.icons, args.max_name_length))
         .collect();
 
-    // Sort: directories (and links to directories) first, then by name
+    // Sort: main dir first, then directories (and links to directories), then by name
     processed_infos.sort_by(|a, b| {
-        a.sort_order_type
-            .cmp(&b.sort_order_type)
-            .then_with(|| a.rinfo.path.file_name().unwrap().to_string_lossy().to_lowercase()
-                .cmp(&b.rinfo.path.file_name().unwrap().to_string_lossy().to_lowercase()))
+        a.sort_keys.cmp(&b.sort_keys)
     });
 
     let max_owner_colsize = processed_infos
@@ -106,7 +119,7 @@ fn run() -> i32 {
         + 1;
 
     // Adds padding and colors to the output.
-    let displayable_infos: Vec<DisplayableInfo> = processed_infos
+    let mut displayable_infos: Vec<DisplayableInfo> = processed_infos
         .into_iter()
         .enumerate()
         .map(|(i, pinfo)| {
@@ -119,16 +132,32 @@ fn run() -> i32 {
         })
         .collect();
 
-    // Print header
-    println!(
-        "{:>4} {:>6} {:>width$} {:>10} NAME",
+    // Print header with inverted colors for more contrast
+    let header = format!(
+        "{:>4} {:>7} {:>width$} {:>10} NAME",
         "PERM",
         "SIZE",
         "OWNER",
         "MODIFIED",
         width = max_owner_colsize
     );
-    println!("{}", "-".repeat(60));
+    println!("{}{}{}", HEADER_BACKGROUND, header, COLOR_RESET);
+
+    // If the input is a single directory, print its own info before the content list
+    if !displayable_infos.is_empty() && displayable_infos[0].is_main_dir {
+        let main_dir_info = displayable_infos.remove(0);
+        println!(
+            "{} {} {} {} {}",
+            main_dir_info.permission_col,
+            main_dir_info.size_col,
+            main_dir_info.owner_col,
+            main_dir_info.date_col,
+            main_dir_info.name_col
+        );
+        if !displayable_infos.is_empty() {
+            println!("{}", "-".repeat(60));
+        }
+    }
 
     // Print each file with formatted output
     for dinfo in displayable_infos {
@@ -141,7 +170,7 @@ fn run() -> i32 {
     0
 }
 
-#[derive(Debug)]
+// #[derive(Debug)]
 struct RawInfo {
     path: PathBuf,
     permissions: u32,
@@ -152,6 +181,7 @@ struct RawInfo {
     is_directory: bool,
     is_executable: bool,
     is_symlink: bool,
+    is_main_dir: bool,
 }
 
 struct ProcessedInfo {
@@ -164,7 +194,7 @@ struct ProcessedInfo {
     name: String,
     target_name: String,
     is_executable: bool,
-    sort_order_type: u8,
+    sort_keys: (u8, String),
 }
 
 impl ProcessedInfo {
@@ -217,7 +247,14 @@ impl ProcessedInfo {
         };
 
         // Format names with folder emoji if directory.
-        let folder_icon = if show_icons { "📂" } else { "■" };
+        let folder_icon = if !show_icons {
+            "■"
+        } else if raw_info.is_main_dir {
+            "📂"
+        } else {
+            "📁"
+        };
+        
         let name = if raw_info.is_directory {
             format!("{} {}", folder_icon, name)
         } else {
@@ -235,10 +272,13 @@ impl ProcessedInfo {
             && !raw_info.is_directory
             && (!target.is_some() || !targets_folder);
 
-        let sort_order_type = if raw_info.is_directory || targets_folder {
-            0
+        let sort_name = raw_info.path.file_name().unwrap().to_string_lossy().to_lowercase();
+        let sort_keys = if raw_info.is_main_dir {
+            (0, sort_name)
+        } else if raw_info.is_directory || targets_folder {
+            (1, sort_name)
         } else {
-            1
+            (2, sort_name)
         };
 
         ProcessedInfo {
@@ -251,7 +291,7 @@ impl ProcessedInfo {
             name,
             target_name,
             is_executable,
-            sort_order_type,
+            sort_keys,
         }
     }
 
@@ -291,6 +331,7 @@ struct DisplayableInfo {
     owner_col: String,
     date_col: String,
     name_col: String,
+    is_main_dir: bool,
 }
 
 impl DisplayableInfo {
@@ -300,7 +341,6 @@ impl DisplayableInfo {
     const GREEN: &'static str = "\x1b[32m";            // Green text for executables
     const YELLOW: &'static str = "\x1b[33m";           // Yellow text for mega size
     const RED: &'static str = "\x1b[31m";              // Red text for giga size
-    const COLOR_RESET: &'static str = "\x1b[0m";
 
     fn new(
         row_index: usize,
@@ -311,7 +351,7 @@ impl DisplayableInfo {
         // Apply zebra striping
         let reset_color = format!(
             "{}{}",
-            Self::COLOR_RESET,
+            COLOR_RESET,
             if row_index % 2 == 0 {
                 Self::ZEBRA_EVEN
             } else {
@@ -330,7 +370,7 @@ impl DisplayableInfo {
         let name_col = format!(
             "{}{}",
             Self::fmt_name(&processed_info, file_colors),
-            Self::COLOR_RESET
+            COLOR_RESET
         );
 
         DisplayableInfo {
@@ -339,6 +379,7 @@ impl DisplayableInfo {
             owner_col,
             date_col,
             name_col,
+            is_main_dir: processed_info.rinfo.is_main_dir,
         }
     }
 
@@ -393,14 +434,14 @@ impl DisplayableInfo {
 
         // Apply green color to executable entries (except directories and folder links)
         if pinfo.is_executable {
-            fname = format!("{}{}{}", Self::GREEN, fname, Self::COLOR_RESET);
+            fname = format!("{}{}{}", Self::GREEN, fname, COLOR_RESET);
         } else if !file_colors.is_empty() {
             // Apply color to file names containing special suffixes
             // Use the original file name (without icons) for suffix checking
             let original_name = pinfo.rinfo.path.file_name().unwrap().to_string_lossy();
             for (suffix, color) in file_colors {
                 if original_name.ends_with(suffix) {
-                    fname = format!("\x1b[{}{}{}", color, fname, Self::COLOR_RESET);
+                    fname = format!("\x1b[{}{}{}", color, fname, COLOR_RESET);
                     break;
                 }
             }
@@ -443,6 +484,7 @@ fn get_file_info(path: &Path) -> Option<RawInfo> {
         is_directory: metadata.is_dir(),
         is_executable: metadata.permissions().mode() & 0o100 != 0,
         is_symlink: metadata.file_type().is_symlink(),
+        is_main_dir: false,
     })
 }
 
