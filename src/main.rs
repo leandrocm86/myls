@@ -46,6 +46,10 @@ struct Args {
     /// Shows folder icons
     #[arg(short, long)]
     icons: bool,
+
+    /// Display the version number
+    #[arg(short, long)]
+    version: bool
 }
 
 fn parse_file_colors(s: &str) -> Result<HashMap<String, String>, String> {
@@ -67,6 +71,11 @@ fn main() {
 
 fn run() -> i32 {
     let args = Args::parse();
+
+    if args.version {
+        println!("myls {}", env!("CARGO_PKG_VERSION"));
+        return 0;
+    }
 
     let paths: Vec<PathBuf> = if args.paths.len() == 1 && args.paths[0] == "." {
         vec![env::current_dir().unwrap_or_else(|_| PathBuf::from("."))]
