@@ -54,6 +54,8 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch all history to ensure tags can be created
 
       - name: Download all built artifacts
         uses: actions/download-artifact@v4
@@ -81,5 +83,12 @@ jobs:
           body: ${{ github.event.inputs.notes }}
           files: release-assets/*
           fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update latest tag
+        run: |
+          git tag -f latest
+          git push origin latest --force
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
