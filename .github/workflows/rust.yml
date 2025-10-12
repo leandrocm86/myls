@@ -60,6 +60,13 @@ jobs:
         with:
           path: ./dist
 
+      - name: Flatten artifact directory
+        run: |
+          mkdir -p release-assets
+          find dist -type f -name 'myls-*' -exec mv {} release-assets/ \;
+          # Verify files exist in release-assets
+          ls -l release-assets/ || { echo "Error: No files found in release-assets"; exit 1; }
+
       - name: Get version from Cargo.toml
         id: cargo_version
         run: |
@@ -72,6 +79,7 @@ jobs:
           tag_name: ${{ env.version }}
           name: ${{ env.version }}
           body: ${{ github.event.inputs.notes }}
-          files: dist/*
+          files: release-assets/*
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
