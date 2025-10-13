@@ -237,7 +237,12 @@ impl ProcessedInfo {
             .unwrap_or(false);
 
         // Enshorten names if needed.
-        let base_name = raw_info.path.file_name().unwrap().to_string_lossy();
+        let base_name = raw_info
+            .path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "/".to_string());
+
         let name = if max_name_length > 0 {
             Self::pstr(&base_name, max_name_length)
         } else {
@@ -281,7 +286,11 @@ impl ProcessedInfo {
             && !raw_info.is_directory
             && (!target.is_some() || !targets_folder);
 
-        let sort_name = raw_info.path.file_name().unwrap().to_string_lossy().to_lowercase();
+        let sort_name = raw_info
+            .path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .unwrap_or_else(|| "/".to_string());
         let sort_keys = if raw_info.is_main_dir {
             (0, sort_name)
         } else if raw_info.is_directory || targets_folder {
@@ -428,7 +437,7 @@ impl DisplayableInfo {
         };
 
         format!(
-            "{}{:>10}{}",
+            "{}{} {}",
             color,
             pinfo.rinfo.modified_time.format(fmt),
             reset_color
@@ -447,7 +456,12 @@ impl DisplayableInfo {
         } else if !file_colors.is_empty() {
             // Apply color to file names containing special suffixes
             // Use the original file name (without icons) for suffix checking
-            let original_name = pinfo.rinfo.path.file_name().unwrap().to_string_lossy();
+            let original_name = pinfo
+                .rinfo
+                .path
+                .file_name()
+                .map(|s| s.to_string_lossy())
+                .unwrap_or_else(|| From::from("/"));
             for (suffix, color) in file_colors {
                 if original_name.ends_with(suffix) {
                     fname = format!("\x1b[{}{}{}", color, fname, COLOR_RESET);
@@ -518,7 +532,10 @@ fn list_directory(directory: &Path, show_hidden: bool) -> Vec<RawInfo> {
         };
 
         let path = entry.path();
-        let file_name = path.file_name().unwrap().to_string_lossy();
+        let file_name = path
+            .file_name()
+            .map(|s| s.to_string_lossy())
+            .unwrap_or(From::from(""));
 
         if show_hidden || !file_name.starts_with('.') {
             if let Some(raw_info) = get_file_info(&path) {
@@ -528,4 +545,88 @@ fn list_directory(directory: &Path, show_hidden: bool) -> Vec<RawInfo> {
     }
 
     raw_infos
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mock_raw_info(path: &str, size: u64, is_directory: bool) -> RawInfo {
+        RawInfo {
+            path: PathBuf::from(path),
+            permissions: 0o755,
+            size,
+            owner_uid: 1000,
+            group_gid: 1000,
+            modified_time: Local::now(),
+            is_directory,
+            is_executable: false,
+            is_symlink: false,
+            is_main_dir: false,
+        }
+    }
+
+    #[test]
+    fn test_process_root_path() {
+        let raw_info = mock_raw_info("/", 0, true);
+        let processed = ProcessedInfo::new(raw_info, false, 0);
+        assert_eq!(processed.name, "■ /");
+        assert_eq!(processed.sort_keys, (1, "/".to_string()));
+    }
+
+    #[test]
+    fn test_get_size_and_unit() {
+        let mut raw_info = mock_raw_info("/tmp/file", 0, false);
+
+        raw_info.size = 500; // Bytes
+        let (size, unit) = ProcessedInfo::get_size_and_unit(&raw_info);
+        assert_eq!(size, "500");
+        assert_eq!(unit, "B");
+
+        raw_info.size = 1536; // 1.5 KB
+        let (size, unit) = ProcessedInfo::get_size_and_unit(&raw_info);
+        assert_eq!(size, "1");
+        assert_eq!(unit, "K");
+
+        raw_info.size = 1_572_864; // 1.5 MB
+        let (size, unit) = ProcessedInfo::get_size_and_unit(&raw_info);
+        assert_eq!(size, "1.5");
+        assert_eq!(unit, "M");
+
+        raw_info.size = 1_610_612_736; // 1.5 GB
+        let (size, unit) = ProcessedInfo::get_size_and_unit(&raw_info);
+        assert_eq!(size, "1.5");
+        assert_eq!(unit, "G");
+    }
+
+    #[test]
+    fn test_displayable_info_formatting() {
+        let raw_info = mock_raw_info("/tmp/file.txt", 1234, false);
+        let processed = ProcessedInfo::new(raw_info, false, 0);
+        let displayable = DisplayableInfo::new(0, processed, 20, &HashMap::new());
+
+        // Test zebra striping (even row)
+        assert!(displayable.permission_col.contains(DisplayableInfo::ZEBRA_EVEN));
+        assert!(displayable.size_col.contains(DisplayableInfo::ZEBRA_EVEN));
+        assert!(displayable.date_col.contains(DisplayableInfo::ZEBRA_EVEN));
+
+        let raw_info_odd = mock_raw_info("/tmp/file2.txt", 5678, false);
+        let processed_odd = ProcessedInfo::new(raw_info_odd, false, 0);
+        let displayable_odd = DisplayableInfo::new(1, processed_odd, 20, &HashMap::new());
+
+        // Test zebra striping (odd row)
+        assert!(displayable_odd.permission_col.contains(DisplayableInfo::ZEBRA_ODD));
+    }
+
+    #[test]
+    fn test_file_colors() {
+        let mut file_colors = HashMap::new();
+        file_colors.insert(".txt".to_string(), "31m".to_string()); // Red
+
+        let raw_info = mock_raw_info("/tmp/file.txt", 100, false);
+        let processed = ProcessedInfo::new(raw_info, false, 0);
+        let displayable = DisplayableInfo::new(0, processed, 20, &file_colors);
+
+        assert!(displayable.name_col.contains("\x1b[31m"));
+    }
 }
